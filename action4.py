@@ -4,6 +4,81 @@ import os
 from matplotlib import pyplot as plt
 import time
 import mediapipe as mp
+import json
+
+LABELS_FILE = 'labels.json'
+
+def load_actions_from_disk(data_path='MP_Data', labels_file=LABELS_FILE, save_if_missing=True, verbose=True):
+    """
+    Load actions from labels.json (preferred) or from folders.
+    Returns Python list of action names (strings), validated and stripped.
+    """
+    # ensure root exists
+    if not os.path.exists(data_path):
+        os.makedirs(data_path, exist_ok=True)
+
+    # helper to clean names
+    def _clean_name(s):
+        if not isinstance(s, str):
+            return None
+        s2 = s.strip()
+        if s2 == "":
+            return None
+        # optionally sanitize (but keep original; don't replace here)
+        return s2
+
+    # If labels file exists -> load and validate entries
+    if os.path.exists(labels_file):
+        try:
+            with open(labels_file, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            if not isinstance(raw, list):
+                if verbose: print(f"⚠️ {labels_file} không phải array, bỏ qua.")
+            else:
+                cleaned = []
+                for entry in raw:
+                    cn = _clean_name(entry)
+                    if cn is None:
+                        if verbose: print(f"⚠️ Bỏ entry không hợp lệ trong {labels_file}: {entry}")
+                        continue
+                    cleaned.append(cn)
+                # ensure directories exist for entries (create if missing)
+                for a in cleaned:
+                    os.makedirs(os.path.join(data_path, a), exist_ok=True)
+                # warn about extra folders not in json
+                existing_folders = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
+                extra = [d for d in existing_folders if d not in cleaned]
+                if extra and verbose:
+                    print(f"⚠️ Có thư mục trong {data_path} nhưng không có trong {labels_file}: {extra}")
+                if verbose: print(f"✅ Loaded {len(cleaned)} actions from {labels_file}: {cleaned}")
+                return cleaned
+        except Exception as e:
+            if verbose: print(f"⚠️ Lỗi khi đọc {labels_file}: {e}")
+
+    # Else: build from folders and optionally save
+    folders = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
+    folders = sorted([_clean_name(d) for d in folders if _clean_name(d) is not None])
+    if save_if_missing:
+        with open(labels_file, 'w', encoding='utf-8') as f:
+            json.dump(folders, f, ensure_ascii=False, indent=2)
+        if verbose: print(f"✅ Tạo {labels_file} từ folders: {folders}")
+    return folders
+
+def save_labels(actions_arr, labels_file=LABELS_FILE):
+    with open(labels_file, 'w', encoding='utf-8') as f:
+        json.dump(actions_arr.tolist(), f, ensure_ascii=False, indent=2)
+
+DEFAULT_COLORS = [(245,117,16), (117,245,16), (16,117,245), (200,200,50), (50,200,200), (200,50,200)]
+def ensure_colors(n):
+    cols = DEFAULT_COLORS.copy()
+    if len(cols) >= n:
+        return cols[:n]
+    # add random-ish colors if need more
+    rng = np.random.RandomState(1)
+    while len(cols) < n:
+        cols.append(tuple(int(x) for x in rng.randint(50, 245, size=3)))
+    return cols
+
 
 # ================== MENU HIỂN THỊ NGAY KHI CHẠY ==================
 print("\n----- Action Detection Menu -----\n")
@@ -73,7 +148,7 @@ def draw_styled_landmarks(image, results):
         )
 
 # 2️⃣ Trích xuất điểm đặc trưng (Extract Keypoints)
-# 40:29 - 3. Extract Keypoints
+# 3. Extract Keypoints
 # ------------------------------
 # Hàm trích xuất keypoints (pose, face, left hand, right hand) từ kết quả Mediapipe
 def extract_keypoints(results):
@@ -85,10 +160,12 @@ def extract_keypoints(results):
 
 # 3️⃣ Cấu hình dữ liệu và hành động (Setup Folders / Define Labels)
 DATA_PATH = 'MP_Data'
-actions = np.array(['hello', 'thanks', 'iloveyou'])
-no_sequences = 5
-sequence_length = 5
-colors = [(245,117,16), (117,245,16), (16,117,245)]
+# actions = np.array(['hello', 'thanks', 'iloveyou'])
+actions = np.array(load_actions_from_disk())
+no_sequences = 10
+sequence_length = 10
+# colors = [(245,117,16), (117,245,16), (16,117,245)]
+colors = ensure_colors(len(actions))
 
 # Visualization: hiển thị xác suất dưới dạng thanh trên ảnh
 def prob_viz(res, actions, input_frame, colors):
@@ -174,61 +251,171 @@ def collect_data():
 # 6️⃣ Huấn luyện mô hình LSTM
 # 8️⃣ Lưu trọng số mô hình
 # 9️⃣ Đánh giá bằng ma trận nhầm lẫn
-def train_model():
-    # Phần load data + train (giữ nguyên logic gốc)
+def train_model(epochs=200, batch_size=8, val_split=0.1, test_size=0.05, random_state=42):
+    """
+    Gộp toàn bộ logic train_model_menu thành 1 hàm duy nhất.
+    - epochs, batch_size, val_split, test_size: params
+    - saves best checkpoint 'best_action_new.h5' and final model 'action.h5'
+    """
+    # imports local để hàm độc lập khi dán vào file
     from sklearn.model_selection import train_test_split
     from tensorflow.keras.utils import to_categorical
-    label_map = {label:num for num, label in enumerate(actions)}
-    sequences, labels = [], []
-    for action in actions:
-        for sequence in range(no_sequences):
-            window = []
-            for frame_num in range(sequence_length):
-                res = np.load(os.path.join(DATA_PATH, action, str(sequence), "{}.npy".format(frame_num)))
-                window.append(res)
-            sequences.append(window)
-            labels.append(label_map[action])
-    np.array(sequences).shape
-    np.array(labels).shape
-    X = np.array(sequences)
-    X.shape
-    y = to_categorical(labels).astype(int)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.05)
-    y_test.shape
-
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import LSTM, Dense
-    from tensorflow.keras.callbacks import TensorBoard
-    log_dir = os.path.join('Logs')
-    tb_callback = TensorBoard(log_dir=log_dir)
+    from tensorflow.keras.callbacks import TensorBoard, EarlyStopping, ModelCheckpoint
+    from sklearn.metrics import classification_report, accuracy_score
+    from sklearn.utils.multiclass import unique_labels
+    from sklearn.metrics import multilabel_confusion_matrix
+    import numpy as np
+    import os, time
+
+    # prepare actions as list
+    try:
+        if isinstance(actions, np.ndarray):
+            actions_list = actions.tolist()
+        else:
+            actions_list = list(actions)
+    except Exception:
+        print("⚠️ Không thể đọc 'actions' từ môi trường. Hãy đảm bảo biến 'actions' đã được gán.")
+        return
+
+    if len(actions_list) == 0:
+        print("❌ Không có action nào để huấn luyện.")
+        return
+
+    print(f"🟢 Training for actions: {actions_list}")
+
+    # collect sequences
+    sequences = []
+    labels = []
+    missing_paths = []
+    label_map = {label: num for num, label in enumerate(actions_list)}
+
+    for action in actions_list:
+        for seq in range(no_sequences):
+            seq_path = os.path.join(DATA_PATH, action, str(seq))
+            # check each expected frame file
+            window = []
+            ok = True
+            for frame_num in range(sequence_length):
+                p = os.path.join(seq_path, f"{frame_num}.npy")
+                if not os.path.exists(p):
+                    missing_paths.append(p)
+                    ok = False
+                    break
+                try:
+                    arr = np.load(p)
+                    window.append(arr.astype(np.float32))
+                except Exception as e:
+                    print(f"⚠️ Lỗi load {p}: {e}")
+                    ok = False
+                    break
+            if ok:
+                sequences.append(window)
+                labels.append(label_map[action])
+
+    if missing_paths:
+        print("⚠️ Một số file bị thiếu (ví dụ):")
+        for p in missing_paths[:10]:
+            print("   ", p)
+        print(f"ℹ️ Tổng file thiếu (liệt kê tối đa 10): {len(missing_paths)}")
+        print("Nếu thiếu nhiều thì nên thu thập thêm dữ liệu hoặc giảm no_sequences/sequence_length.")
+
+    if len(sequences) == 0:
+        print("❌ Không tìm thấy sequence hợp lệ để train. Kiểm tra MP_Data.")
+        return
+
+    X = np.array(sequences)  # shape (N, seq_len, feat_dim)
+    y = to_categorical(labels).astype(int)
+
+    print(f"✅ Loaded sequences: {X.shape[0]}. Each sequence shape: {X.shape[1:]}")
+
+    # preprocessing: normalize per-sequence + add velocity (giữ nguyên logic gốc)
+    def normalize_and_add_velocity(batch):
+        N, T, D = batch.shape
+        out = np.zeros((N, T, D * 2), dtype=np.float32)
+        for i in range(N):
+            seq = batch[i]
+            mean = seq.mean(axis=0)
+            std = seq.std(axis=0) + 1e-8
+            norm = (seq - mean) / std
+            vel = np.vstack([np.zeros((1, D), dtype=np.float32), norm[1:] - norm[:-1]])
+            out[i] = np.concatenate([norm, vel], axis=1)
+        return out
+
+    X_proc = normalize_and_add_velocity(X)
+    print("🔧 Applied normalization + velocity. New feature dim:", X_proc.shape[2])
+
+    # split
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(X_proc, y, test_size=test_size,
+                                                            random_state=random_state, stratify=y)
+    except Exception:
+        X_train, X_test, y_train, y_test = train_test_split(X_proc, y, test_size=test_size,
+                                                            random_state=random_state)
+    print(f"📊 Train: {X_train.shape[0]}  Test: {X_test.shape[0]}")
+
+    # build model (same architecture as in train_model_menu)
+    feature_dim = X_train.shape[2]
+    timesteps = X_train.shape[1]
     model_local = Sequential()
-    model_local.add(LSTM(64, return_sequences=True, activation='relu', input_shape=(X_train.shape[1], X_train.shape[2])))
+    model_local.add(LSTM(64, return_sequences=True, activation='relu', input_shape=(timesteps, feature_dim)))
     model_local.add(LSTM(128, return_sequences=True, activation='relu'))
     model_local.add(LSTM(64, return_sequences=False, activation='relu'))
     model_local.add(Dense(64, activation='relu'))
     model_local.add(Dense(32, activation='relu'))
-    model_local.add(Dense(actions.shape[0], activation='softmax'))
+    model_local.add(Dense(len(actions_list), activation='softmax'))
 
-    res = [.7, 0.2, 0.1]
-    actions[np.argmax(res)]
     model_local.compile(optimizer='Adam', loss='categorical_crossentropy', metrics=['categorical_accuracy'])
-    from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 
-    es = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
-    mc = ModelCheckpoint('best_action.h5', monitor='val_loss', save_best_only=True)
+    # callbacks
+    log_dir = os.path.join('Logs', time.strftime("%Y%m%d-%H%M%S"))
+    tb_callback_local = TensorBoard(log_dir=log_dir)
+    es_local = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
+    mc_local = ModelCheckpoint('best_action_new.h5', monitor='val_loss', save_best_only=True, verbose=1)
 
-    model_local.fit(
-        X_train, y_train,
-        epochs=200,
-        batch_size=8,
-        validation_split=0.1,
-        callbacks=[tb_callback, es, mc]
-    )
+    print("🧠 Starting training... (this may take a while)")
+    model_local.fit(X_train, y_train,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    validation_split=val_split,
+                    callbacks=[tb_callback_local, es_local, mc_local],
+                    verbose=1)
 
-    model_local.load_weights('best_action.h5')
-    model_local.summary()
-    print("✅ Huấn luyện hoàn tất. Mô hình được lưu lại.")
+    # load best if exists
+    try:
+        model_local.load_weights('best_action_new.h5')
+        print("✅ Loaded best weights from best_action_new.h5")
+    except Exception:
+        print("ℹ️ No best_action_new.h5 found or couldn't load it. Using final weights from training.")
 
+    # save final model
+    try:
+        model_local.save('action.h5')
+        print("✅ Saved final model as action.h5")
+    except Exception as e:
+        print("⚠️ Could not save action.h5:", e)
+
+    # evaluate on test set
+    preds = model_local.predict(X_test)
+    ytrue = np.argmax(y_test, axis=1)
+    yhat = np.argmax(preds, axis=1)
+
+    print("\n--- Classification Report ---")
+    try:
+        print(classification_report(ytrue, yhat, target_names=actions_list))
+    except Exception as e:
+        print("⚠️ classification_report error:", e)
+        print("ytrue:", ytrue, "yhat:", yhat)
+
+    print("\n--- Confusion Matrix ---")
+    try:
+        print(multilabel_confusion_matrix(ytrue, yhat))
+        print("Accuracy:", accuracy_score(ytrue, yhat))
+    except Exception as e:
+        print("⚠️ Could not compute confusion matrix:", e)
+
+    print("\n🎉 Training finished. Check 'action.h5' (final) and 'best_action_new.h5' (best checkpoint).")
 # ----- 3) run_inference() -----
 # 7️⃣ Dự đoán ngôn ngữ ký hiệu
 # 🔟 Kiểm tra mô hình thời gian thực
@@ -241,13 +428,23 @@ def run_inference(model_path='action.h5'):
     try:
         from tensorflow.keras.models import load_model as _lm
         model = _lm(model_path)
+        print("DEBUG: loaded labels (actions):", actions)
+        try:
+            out_shape = model.output_shape  # (None, n_classes)
+            n_model_classes = out_shape[-1]
+        except Exception:
+            # fallback
+            n_model_classes = model.layers[-1].output_shape[-1]
+        print("DEBUG: model predicts", n_model_classes, "classes")
+        if len(actions) != n_model_classes:
+            print(f"⚠️ MISMATCH: labels.json has {len(actions)} actions but model predicts {n_model_classes} classes.")
     except Exception as e:
         print("Failed to load model:", e)
         return
 
     sequence = []
     sentence = []
-    threshold = 0.8
+    threshold = 0.55
 
     cap = cv2.VideoCapture(0)
     # Set mediapipe model 

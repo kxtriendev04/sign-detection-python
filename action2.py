@@ -4,6 +4,7 @@ import os
 from matplotlib import pyplot as plt
 import time
 import mediapipe as mp
+import json
 
 # ================== MENU HIỂN THỊ NGAY KHI CHẠY ==================
 print("\n----- Action Detection Menu -----\n")
@@ -109,14 +110,73 @@ np.load('0.npy')
 # DATA_PATH = os.path.join('MP_Data') 
 DATA_PATH = 'MP_Data'
 
+LABELS_FILE = 'labels.json'
+
+def load_actions_from_disk(data_path='MP_Data', labels_file=LABELS_FILE, save_if_missing=True, verbose=True):
+    """
+    Load actions from labels.json (preferred) or from folders.
+    Returns Python list of action names (strings), validated and stripped.
+    """
+    # ensure root exists
+    if not os.path.exists(data_path):
+        os.makedirs(data_path, exist_ok=True)
+
+    # helper to clean names
+    def _clean_name(s):
+        if not isinstance(s, str):
+            return None
+        s2 = s.strip()
+        if s2 == "":
+            return None
+        # optionally sanitize (but keep original; don't replace here)
+        return s2
+
+    # If labels file exists -> load and validate entries
+    if os.path.exists(labels_file):
+        try:
+            with open(labels_file, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            if not isinstance(raw, list):
+                if verbose: print(f"⚠️ {labels_file} không phải array, bỏ qua.")
+            else:
+                cleaned = []
+                for entry in raw:
+                    cn = _clean_name(entry)
+                    if cn is None:
+                        if verbose: print(f"⚠️ Bỏ entry không hợp lệ trong {labels_file}: {entry}")
+                        continue
+                    cleaned.append(cn)
+                # ensure directories exist for entries (create if missing)
+                for a in cleaned:
+                    os.makedirs(os.path.join(data_path, a), exist_ok=True)
+                # warn about extra folders not in json
+                existing_folders = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
+                extra = [d for d in existing_folders if d not in cleaned]
+                if extra and verbose:
+                    print(f"⚠️ Có thư mục trong {data_path} nhưng không có trong {labels_file}: {extra}")
+                if verbose: print(f"✅ Loaded {len(cleaned)} actions from {labels_file}: {cleaned}")
+                return cleaned
+        except Exception as e:
+            if verbose: print(f"⚠️ Lỗi khi đọc {labels_file}: {e}")
+
+    # Else: build from folders and optionally save
+    folders = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
+    folders = sorted([_clean_name(d) for d in folders if _clean_name(d) is not None])
+    if save_if_missing:
+        with open(labels_file, 'w', encoding='utf-8') as f:
+            json.dump(folders, f, ensure_ascii=False, indent=2)
+        if verbose: print(f"✅ Tạo {labels_file} từ folders: {folders}")
+    return folders
+
+
 # Actions that we try to detect
-actions = np.array(['hello', 'thanks', 'iloveyou'])
+actions = np.array(load_actions_from_disk())
 
 # Thirty videos worth of data
-no_sequences = 5
+no_sequences = 10
 
 # Videos are going to be 30 frames in length
-sequence_length = 5
+sequence_length = 10
 
 for action in actions: 
     for sequence in range(no_sequences):
@@ -277,9 +337,31 @@ print("Confusion Matrix:")
 print(multilabel_confusion_matrix(ytrue, yhat))
 print("Accuracy:", accuracy_score(ytrue, yhat))
 
-colors = [(245,117,16), (117,245,16), (16,117,245)]
+# Nếu chưa có ensure_colors thì thêm:
+DEFAULT_COLORS = [
+    (245,117,16), (117,245,16), (16,117,245),
+    (200,200,50), (50,200,200), (200,50,200),
+    (180,100,200), (100,180,120), (120,100,180)
+]
+def ensure_colors(n):
+    cols = DEFAULT_COLORS.copy()
+    if len(cols) >= n:
+        return cols[:n]
+    # tạo thêm màu ngẫu nhiên có seed cố định để tái tạo được kết quả
+    rng = np.random.RandomState(42)
+    while len(cols) < n:
+        cols.append(tuple(int(x) for x in rng.randint(40, 240, size=3)))
+    return cols
+
+# Sau khi load actions (ví dụ actions = load_actions_from_disk() hoặc np.array(...)):
+# đảm bảo actions là list hoặc numpy array
+if isinstance(actions, np.ndarray):
+    actions = actions.tolist()
+
+
+# colors = [(245,117,16), (117,245,16), (16,117,245)]
 # Thay thế hàm prob_viz hiện tại bằng đoạn này
-colors = [(245,117,16), (117,245,16), (16,117,245)]
+colors = ensure_colors(len(actions))
 
 def prob_viz(res, actions, input_frame, colors):
     """
@@ -440,7 +522,7 @@ def train_model_menu():
     mc_local = ModelCheckpoint('best_action_new.h5', monitor='val_loss', save_best_only=True)
 
     model_local.fit(X_train, y_train, epochs=200, batch_size=8, validation_split=0.1, callbacks=[tb_callback, es_local, mc_local])
-    model_local.save('action_new.h5')
+    model_local.save('action.h5')
     print("New model trained and saved as action_new.h5")
 
 
